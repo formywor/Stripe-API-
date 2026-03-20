@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const Stripe = require("stripe");
 
-const BUILD = "sn-stripe-webhook-2026-03-20-subscriptions-b";
+const BUILD = "sn-stripe-webhook-2026-03-20-balance-c";
 const ALLOWED_ORIGIN = "https://scriptnovaa.com";
 
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
@@ -41,7 +41,7 @@ const PLAN_DEFS = {
     tier: "pro_monthly",
     kind: "subscription",
     billingMode: "monthly",
-    ttlSeconds: 30 * 24 * 60 * 60,
+    ttlSeconds: 48 * 60 * 60,
     sessionLimit: 6,
     maxDevices: 4
   },
@@ -52,7 +52,7 @@ const PLAN_DEFS = {
     tier: "pro_yearly",
     kind: "subscription",
     billingMode: "yearly",
-    ttlSeconds: 30 * 24 * 60 * 60,
+    ttlSeconds: 48 * 60 * 60,
     sessionLimit: 6,
     maxDevices: 4
   },
@@ -63,7 +63,7 @@ const PLAN_DEFS = {
     tier: "elite_monthly",
     kind: "subscription",
     billingMode: "monthly",
-    ttlSeconds: 90 * 24 * 60 * 60,
+    ttlSeconds: 168 * 60 * 60,
     sessionLimit: 10,
     maxDevices: 6
   },
@@ -74,7 +74,7 @@ const PLAN_DEFS = {
     tier: "elite_yearly",
     kind: "subscription",
     billingMode: "yearly",
-    ttlSeconds: 90 * 24 * 60 * 60,
+    ttlSeconds: 168 * 60 * 60,
     sessionLimit: 10,
     maxDevices: 6
   },
@@ -85,7 +85,7 @@ const PLAN_DEFS = {
     tier: "express_one_time",
     kind: "payment",
     billingMode: "one_time",
-    ttlSeconds: 5444 * 60 * 60,
+    ttlSeconds: 720 * 60 * 60,
     sessionLimit: 725,
     maxDevices: 2
   },
@@ -96,7 +96,7 @@ const PLAN_DEFS = {
     tier: "black_express_one_time",
     kind: "payment",
     billingMode: "one_time",
-    ttlSeconds: 12000 * 60 * 60,
+    ttlSeconds: 1800 * 60 * 60,
     sessionLimit: 1500,
     maxDevices: 12
   }
@@ -263,6 +263,17 @@ function planFromMetadata(metadata) {
 async function planFromSession(session) {
   const metaPlan = planFromMetadata(session && session.metadata);
   if (metaPlan) return metaPlan;
+
+  try {
+    const lineItems = await stripe.checkout.sessions.listLineItems(session.id, { limit: 5 });
+    for (const item of (lineItems && item.data) || []) {
+      const priceId = String(item && item.price && item.price.id || "").trim();
+      const mapped = PRICE_TO_PLAN[priceId];
+      if (mapped && PLAN_DEFS[mapped]) {
+        return PLAN_DEFS[mapped];
+      }
+    }
+  } catch {}
 
   try {
     const lineItems = await stripe.checkout.sessions.listLineItems(session.id, { limit: 5 });
@@ -684,7 +695,6 @@ async function handleChargeRefunded(eventId, charge) {
     return { ignored: true, reason: "missing_payment_intent_id" };
   }
 
-  const searchKeys = [];
   const response = await fetch(`${KV_REST_API_URL}/scan/sn:stripe:purchase:session:*`, {
     method: "GET",
     headers: {
@@ -699,12 +709,9 @@ async function handleChargeRefunded(eventId, charge) {
 
   const payload = safeJsonParse(text, {});
   const items = Array.isArray(payload.result) ? payload.result : [];
-  for (const key of items) {
-    searchKeys.push(String(key));
-  }
 
-  for (const key of searchKeys) {
-    const purchaseRecord = await kvGetJson(key);
+  for (const key of items) {
+    const purchaseRecord = await kvGetJson(String(key));
     const purchasePaymentIntentId = String(purchaseRecord && purchaseRecord.stripe && purchaseRecord.stripe.paymentIntentId || "").trim();
     if (purchasePaymentIntentId && purchasePaymentIntentId === paymentIntentId) {
       const updated = await disablePurchaseAndKey(purchaseRecord, "refunded");
