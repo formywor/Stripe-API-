@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>shhh</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      background: #0d001a;
+      color: #ff3366;
+      font-family: "Courier New", monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    h1 {
+      font-size: 4.5rem;
+      margin: 0;
+      text-shadow: 0 0 20px #ff3366aa;
+      animation: flicker 3s infinite alternate;
+    }
+    .subtitle {
+      font-size: 1.6rem;
+      margin-top: 1.5rem;
+      color: #ff66aa;
+      opacity: 0.9;
+    }
+    .tiny {
+      position: absolute;
+      bottom: 2rem;
+      font-size: 0.9rem;
+      color: #444;
+      opacity: 0.4;
+    }
+    @keyframes flicker {
+      0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% { text-shadow: 0 0 20px #ff3366aa; }
+      20%, 24%, 55% { text-shadow: none; }
+    }
+    .blink {
+      animation: blink 1.2s step-end infinite;
+    }
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>you</h1>
+  <div class="subtitle">were never supposed to see this page :&gt;</div>
+
+  <div class="tiny">close tab • pretend you saw nothing • tell no one</div>
+
+</body>
+</html>
