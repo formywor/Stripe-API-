@@ -7,7 +7,7 @@ const BUILD = "sn-stripe-checkout-2026-03-19b";
   Replace these placeholder values with your real Stripe values.
   Do not commit real secrets to public repos.
 */
-const STRIPE_SECRET_KEY = "REPLACE_WITH_YOUR_STRIPE_SECRET_KEY";
+const STRIPE_SECRET_KEY = "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";
 
 const PRICE_IDS = {
   basic_monthly: "price_1TCsni9sB3aXUCNwFEbPx7xq",
