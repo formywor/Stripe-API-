@@ -1,14 +1,10 @@
 const crypto = require("crypto");
 const Stripe = require("stripe");
 
-const BUILD = "sn-stripe-checkout-2026-03-19c";
+const BUILD = "sn-stripe-checkout-2026-03-20d";
 
 const ALLOWED_ORIGIN = "https://scriptnovaa.com";
-
-/*
-  Replace these placeholder values with your real Stripe values.
-*/
-const STRIPE_SECRET_KEY = "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";
+const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 
 const PRICE_IDS = {
   basic_monthly: "price_1TCsni9sB3aXUCNwFEbPx7xq",
@@ -177,7 +173,7 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  if (!STRIPE_SECRET_KEY || STRIPE_SECRET_KEY.indexOf("REPLACE_WITH_") === 0) {
+  if (!STRIPE_SECRET_KEY) {
     return sendJson(req, res, 500, {
       ok: false,
       error: "missing_stripe_secret_key",
