@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const Stripe = require("stripe");
 
-const BUILD = "sn-stripe-webhook-2026-03-20a";
+const BUILD = "sn-stripe-webhook-2026-03-20-subscriptions-b";
 const ALLOWED_ORIGIN = "https://scriptnovaa.com";
 
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
@@ -192,8 +192,16 @@ function keyWebhookEvent(eventId) {
   return `sn:stripe:webhook:event:${String(eventId || "")}`;
 }
 
+function keyPurchaseBySubscription(subscriptionId) {
+  return `sn:stripe:purchase:subscription:${String(subscriptionId || "")}`;
+}
+
 function customKeyRedisKey(license) {
   return `sn:custom:${String(license || "")}`;
+}
+
+function disabledKeyRedisKey(license) {
+  return `sn:disabled:${String(license || "")}`;
 }
 
 async function kvCommand(args) {
@@ -238,6 +246,14 @@ async function kvSetJson(key, value) {
   return await kvCommand(["SET", key, JSON.stringify(value)]);
 }
 
+async function kvSetValue(key, value) {
+  return await kvCommand(["SET", key, String(value)]);
+}
+
+async function kvDelete(key) {
+  return await kvCommand(["DEL", key]);
+}
+
 function planFromMetadata(metadata) {
   const direct = String((metadata && metadata.planId) || "").trim();
   if (PLAN_DEFS[direct]) return PLAN_DEFS[direct];
@@ -262,22 +278,27 @@ async function planFromSession(session) {
   return null;
 }
 
-function buildCustomKeyRecord(license, plan, checkoutSession, purchaseId) {
+function buildCustomKeyRecord(license, plan, checkoutSession, purchaseId, overrides) {
   const createdAt = nowSec();
-  const exp = createdAt + plan.ttlSeconds;
   const customerEmail = sanitizeEmail(checkoutSession.customer_details && checkoutSession.customer_details.email || checkoutSession.customer_email || "");
+  const exp = Number(overrides && overrides.exp || (createdAt + plan.ttlSeconds));
+  const ttlSeconds = Math.max(1, Number(overrides && overrides.ttlSeconds || plan.ttlSeconds));
+  const billingState = String(overrides && overrides.billingState || "active");
+  const refunded = !!(overrides && overrides.refunded);
 
   return {
     license,
     plan: plan.plan,
     tier: plan.tier,
-    ttlSeconds: plan.ttlSeconds,
+    ttlSeconds,
     sessionLimit: plan.sessionLimit,
     maxDevices: plan.maxDevices,
     exp,
     note: `Stripe ${plan.label} purchase (${checkoutSession.id})`,
     createdAt,
     createdBy: "stripe_webhook",
+    billingState,
+    refunded,
     stripe: {
       purchaseId: String(purchaseId || ""),
       checkoutSessionId: String(checkoutSession.id || ""),
@@ -293,12 +314,13 @@ function buildCustomKeyRecord(license, plan, checkoutSession, purchaseId) {
   };
 }
 
-function buildPurchaseRecord({ session, plan, license, purchaseId, orderRef, customKeyRecord, eventId }) {
+function buildPurchaseRecord({ session, plan, license, purchaseId, orderRef, customKeyRecord, eventId, overrides }) {
   const customerEmail = sanitizeEmail(session.customer_details && session.customer_details.email || session.customer_email || "");
+
   return {
     ok: true,
     fulfilled: true,
-    status: "fulfilled",
+    status: String(overrides && overrides.status || "fulfilled"),
     eventId: String(eventId || ""),
     purchaseId: String(purchaseId || ""),
     orderRef: String(orderRef || ""),
@@ -313,6 +335,8 @@ function buildPurchaseRecord({ session, plan, license, purchaseId, orderRef, cus
     plan: plan.plan,
     tier: plan.tier,
     billingMode: plan.billingMode,
+    billingState: String(overrides && overrides.billingState || "active"),
+    refunded: !!(overrides && overrides.refunded),
     limits: {
       ttlSeconds: customKeyRecord.ttlSeconds,
       sessionLimit: customKeyRecord.sessionLimit,
@@ -336,9 +360,181 @@ function buildPurchaseRecord({ session, plan, license, purchaseId, orderRef, cus
       amountTotal: Number(session.amount_total || 0),
       currency: String(session.currency || "").toUpperCase()
     },
-    createdAt: nowSec(),
+    createdAt: Number(overrides && overrides.createdAt || nowSec()),
+    updatedAt: nowSec(),
     build: BUILD
   };
+}
+
+function isSubStatusActive(status) {
+  const s = String(status || "").toLowerCase();
+  return s === "active" || s === "trialing" || s === "past_due";
+}
+
+async function getSubscriptionPeriodEnd(subscriptionId) {
+  const sid = String(subscriptionId || "").trim();
+  if (!sid) return 0;
+  const sub = await stripe.subscriptions.retrieve(sid);
+  return Number(sub && sub.current_period_end || 0);
+}
+
+function ttlFromExp(exp) {
+  const now = nowSec();
+  if (!exp || exp <= now) return 1;
+  return exp - now;
+}
+
+async function storePurchaseAndMappings(purchaseRecord, customKeyRecord) {
+  const license = String(purchaseRecord && purchaseRecord.deliveredKey || "");
+  const sessionId = String(purchaseRecord && purchaseRecord.checkoutSessionId || "");
+  const purchaseId = String(purchaseRecord && purchaseRecord.purchaseId || "");
+  const subscriptionId = String(purchaseRecord && purchaseRecord.stripe && purchaseRecord.stripe.subscriptionId || "");
+
+  await kvSetJson(customKeyRedisKey(license), customKeyRecord);
+  await kvDelete(disabledKeyRedisKey(license));
+
+  if (sessionId) {
+    await kvSetJson(keyPurchaseBySession(sessionId), purchaseRecord);
+  }
+  if (purchaseId) {
+    await kvSetJson(keyPurchaseById(purchaseId), purchaseRecord);
+  }
+  if (subscriptionId) {
+    await kvSetJson(keyPurchaseBySubscription(subscriptionId), purchaseRecord);
+  }
+}
+
+async function disablePurchaseAndKey(purchaseRecord, reason) {
+  if (!purchaseRecord || !purchaseRecord.deliveredKey) {
+    throw new Error("missing_purchase_for_disable");
+  }
+
+  const license = String(purchaseRecord.deliveredKey);
+  const now = nowSec();
+  const updatedPurchase = {
+    ...purchaseRecord,
+    status: "stopped",
+    billingState: String(reason || "stopped"),
+    updatedAt: now,
+    limits: {
+      ...(purchaseRecord.limits || {}),
+      exp: now
+    },
+    key: {
+      ...(purchaseRecord.key || {}),
+      exp: now
+    }
+  };
+
+  const customExisting = await kvGetJson(customKeyRedisKey(license));
+  const customUpdated = {
+    ...(customExisting || {}),
+    license,
+    exp: now,
+    billingState: String(reason || "stopped"),
+    refunded: reason === "refunded"
+  };
+
+  await kvSetJson(customKeyRedisKey(license), customUpdated);
+  await kvSetValue(disabledKeyRedisKey(license), String(reason || "stopped"));
+
+  const purchaseId = String(updatedPurchase.purchaseId || "");
+  const sessionId = String(updatedPurchase.checkoutSessionId || "");
+  const subscriptionId = String(updatedPurchase.stripe && updatedPurchase.stripe.subscriptionId || "");
+
+  if (sessionId) await kvSetJson(keyPurchaseBySession(sessionId), updatedPurchase);
+  if (purchaseId) await kvSetJson(keyPurchaseById(purchaseId), updatedPurchase);
+  if (subscriptionId) await kvSetJson(keyPurchaseBySubscription(subscriptionId), updatedPurchase);
+
+  return updatedPurchase;
+}
+
+async function updatePurchaseForSubscriptionState(subscription, stateOverride) {
+  const subscriptionId = String(subscription && subscription.id || "").trim();
+  if (!subscriptionId) {
+    throw new Error("missing_subscription_id");
+  }
+
+  const purchaseRecord = await kvGetJson(keyPurchaseBySubscription(subscriptionId));
+  if (!purchaseRecord || !purchaseRecord.deliveredKey) {
+    throw new Error("purchase_not_found_for_subscription");
+  }
+
+  const license = String(purchaseRecord.deliveredKey);
+  const planId = String(purchaseRecord.planId || "").trim();
+  const plan = PLAN_DEFS[planId];
+  if (!plan) {
+    throw new Error("unknown_plan_for_subscription");
+  }
+
+  const currentPeriodEnd = Number(subscription.current_period_end || 0);
+  const billingState = String(stateOverride || subscription.status || "active");
+  const refunded = !!purchaseRecord.refunded;
+
+  const existingCustom = await kvGetJson(customKeyRedisKey(license));
+  const exp = currentPeriodEnd > 0 ? currentPeriodEnd : nowSec();
+  const ttlSeconds = ttlFromExp(exp);
+
+  const updatedCustom = {
+    ...(existingCustom || {}),
+    license,
+    plan: plan.plan,
+    tier: plan.tier,
+    ttlSeconds,
+    sessionLimit: plan.sessionLimit,
+    maxDevices: plan.maxDevices,
+    exp,
+    billingState,
+    refunded,
+    stripe: {
+      ...((existingCustom && existingCustom.stripe) || {}),
+      subscriptionId,
+      customerId: String(subscription.customer || "")
+    }
+  };
+
+  const updatedPurchase = {
+    ...purchaseRecord,
+    status: subscription.cancel_at_period_end ? "canceling_at_period_end" : (isSubStatusActive(subscription.status) ? "fulfilled" : "stopped"),
+    billingState,
+    refunded,
+    limits: {
+      ...(purchaseRecord.limits || {}),
+      ttlSeconds,
+      sessionLimit: plan.sessionLimit,
+      maxDevices: plan.maxDevices,
+      exp
+    },
+    key: {
+      ...(purchaseRecord.key || {}),
+      license,
+      plan: plan.plan,
+      tier: plan.tier,
+      ttlSeconds,
+      sessionLimit: plan.sessionLimit,
+      maxDevices: plan.maxDevices,
+      exp
+    },
+    stripe: {
+      ...(purchaseRecord.stripe || {}),
+      subscriptionId
+    },
+    updatedAt: nowSec()
+  };
+
+  await kvSetJson(customKeyRedisKey(license), updatedCustom);
+
+  if (isSubStatusActive(subscription.status)) {
+    await kvDelete(disabledKeyRedisKey(license));
+  } else {
+    await kvSetValue(disabledKeyRedisKey(license), subscription.status || "stopped");
+  }
+
+  if (updatedPurchase.checkoutSessionId) await kvSetJson(keyPurchaseBySession(updatedPurchase.checkoutSessionId), updatedPurchase);
+  if (updatedPurchase.purchaseId) await kvSetJson(keyPurchaseById(updatedPurchase.purchaseId), updatedPurchase);
+  await kvSetJson(keyPurchaseBySubscription(subscriptionId), updatedPurchase);
+
+  return updatedPurchase;
 }
 
 async function fulfillCheckoutSession(eventId, session) {
@@ -363,12 +559,25 @@ async function fulfillCheckoutSession(eventId, session) {
     throw new Error("unknown_plan_for_checkout_session");
   }
 
+  let exp = nowSec() + plan.ttlSeconds;
+  if (plan.kind === "subscription" && session.subscription) {
+    const subPeriodEnd = await getSubscriptionPeriodEnd(session.subscription);
+    if (subPeriodEnd > 0) {
+      exp = subPeriodEnd;
+    }
+  }
+
   let license = existing && existing.deliveredKey ? String(existing.deliveredKey) : "";
   if (!license) {
     license = generateLicense(plan.planId);
   }
 
-  const customKeyRecord = buildCustomKeyRecord(license, plan, session, purchaseId);
+  const customKeyRecord = buildCustomKeyRecord(license, plan, session, purchaseId, {
+    exp,
+    ttlSeconds: ttlFromExp(exp),
+    billingState: plan.kind === "subscription" ? "active" : "paid"
+  });
+
   const purchaseRecord = buildPurchaseRecord({
     session,
     plan,
@@ -376,20 +585,140 @@ async function fulfillCheckoutSession(eventId, session) {
     purchaseId,
     orderRef,
     customKeyRecord,
-    eventId
+    eventId,
+    overrides: {
+      status: "fulfilled",
+      billingState: plan.kind === "subscription" ? "active" : "paid"
+    }
   });
 
-  await kvSetJson(customKeyRedisKey(license), customKeyRecord);
-  await kvSetJson(keyPurchaseBySession(session.id), purchaseRecord);
-
-  if (purchaseId) {
-    await kvSetJson(keyPurchaseById(purchaseId), purchaseRecord);
-  }
+  await storePurchaseAndMappings(purchaseRecord, customKeyRecord);
 
   return {
     alreadyFulfilled: false,
     purchase: purchaseRecord
   };
+}
+
+async function handleInvoicePaid(eventId, invoice) {
+  const subscriptionId = String(invoice && invoice.subscription || "").trim();
+  if (!subscriptionId) {
+    return { ignored: true, reason: "invoice_without_subscription" };
+  }
+
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  const purchaseRecord = await updatePurchaseForSubscriptionState(subscription, "active");
+
+  return {
+    ok: true,
+    eventId,
+    subscriptionId,
+    purchaseId: String(purchaseRecord.purchaseId || ""),
+    license: String(purchaseRecord.deliveredKey || "")
+  };
+}
+
+async function handleSubscriptionUpdated(eventId, subscription) {
+  const status = String(subscription && subscription.status || "").toLowerCase();
+
+  if (!isSubStatusActive(status) && status !== "canceled" && status !== "unpaid" && status !== "incomplete_expired") {
+    return { ignored: true, reason: "subscription_status_not_actionable", status };
+  }
+
+  const purchaseRecord = await updatePurchaseForSubscriptionState(subscription, status);
+  return {
+    ok: true,
+    eventId,
+    subscriptionId: String(subscription.id || ""),
+    status,
+    purchaseId: String(purchaseRecord.purchaseId || ""),
+    license: String(purchaseRecord.deliveredKey || "")
+  };
+}
+
+async function handleSubscriptionDeleted(eventId, subscription) {
+  const subscriptionId = String(subscription && subscription.id || "").trim();
+  if (!subscriptionId) {
+    return { ignored: true, reason: "missing_subscription_id" };
+  }
+
+  const purchaseRecord = await kvGetJson(keyPurchaseBySubscription(subscriptionId));
+  if (!purchaseRecord || !purchaseRecord.deliveredKey) {
+    return { ignored: true, reason: "subscription_purchase_not_found" };
+  }
+
+  const updated = await disablePurchaseAndKey(purchaseRecord, "subscription_deleted");
+  return {
+    ok: true,
+    eventId,
+    subscriptionId,
+    purchaseId: String(updated.purchaseId || ""),
+    license: String(updated.deliveredKey || "")
+  };
+}
+
+async function handleInvoicePaymentFailed(eventId, invoice) {
+  const subscriptionId = String(invoice && invoice.subscription || "").trim();
+  if (!subscriptionId) {
+    return { ignored: true, reason: "invoice_without_subscription" };
+  }
+
+  const purchaseRecord = await kvGetJson(keyPurchaseBySubscription(subscriptionId));
+  if (!purchaseRecord || !purchaseRecord.deliveredKey) {
+    return { ignored: true, reason: "subscription_purchase_not_found" };
+  }
+
+  const updated = await disablePurchaseAndKey(purchaseRecord, "payment_failed");
+  return {
+    ok: true,
+    eventId,
+    subscriptionId,
+    purchaseId: String(updated.purchaseId || ""),
+    license: String(updated.deliveredKey || "")
+  };
+}
+
+async function handleChargeRefunded(eventId, charge) {
+  const paymentIntentId = String(charge && charge.payment_intent || "").trim();
+  if (!paymentIntentId) {
+    return { ignored: true, reason: "missing_payment_intent_id" };
+  }
+
+  const searchKeys = [];
+  const response = await fetch(`${KV_REST_API_URL}/scan/sn:stripe:purchase:session:*`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${KV_REST_API_TOKEN}`
+    }
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`kv_scan_failed:${response.status}:${text || "scan_failed"}`);
+  }
+
+  const payload = safeJsonParse(text, {});
+  const items = Array.isArray(payload.result) ? payload.result : [];
+  for (const key of items) {
+    searchKeys.push(String(key));
+  }
+
+  for (const key of searchKeys) {
+    const purchaseRecord = await kvGetJson(key);
+    const purchasePaymentIntentId = String(purchaseRecord && purchaseRecord.stripe && purchaseRecord.stripe.paymentIntentId || "").trim();
+    if (purchasePaymentIntentId && purchasePaymentIntentId === paymentIntentId) {
+      const updated = await disablePurchaseAndKey(purchaseRecord, "refunded");
+      return {
+        ok: true,
+        eventId,
+        paymentIntentId,
+        purchaseId: String(updated.purchaseId || ""),
+        license: String(updated.deliveredKey || "")
+      };
+    }
+  }
+
+  return { ignored: true, reason: "purchase_not_found_for_refund" };
 }
 
 module.exports = async function handler(req, res) {
@@ -466,38 +795,27 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    let result = { ok: true, ignored: true };
+
     if (event.type === "checkout.session.completed") {
-      const session = event.data && event.data.object ? event.data.object : null;
-      const result = await fulfillCheckoutSession(event.id, session);
-
-      await kvSetJson(keyWebhookEvent(event.id), {
-        processed: true,
-        eventId: event.id,
-        type: event.type,
-        checkoutSessionId: String(session && session.id || ""),
-        purchaseId: String(session && session.metadata && session.metadata.purchaseId || session && session.client_reference_id || ""),
-        alreadyFulfilled: !!result.alreadyFulfilled,
-        processedAt: nowSec(),
-        build: BUILD
-      });
-
-      return sendJson(req, res, 200, {
-        ok: true,
-        received: true,
-        type: event.type,
-        eventId: event.id,
-        checkoutSessionId: String(session && session.id || ""),
-        purchaseId: String(result.purchase && result.purchase.purchaseId || ""),
-        alreadyFulfilled: !!result.alreadyFulfilled,
-        build: BUILD
-      });
+      result = await fulfillCheckoutSession(event.id, event.data && event.data.object ? event.data.object : null);
+    } else if (event.type === "invoice.paid") {
+      result = await handleInvoicePaid(event.id, event.data && event.data.object ? event.data.object : null);
+    } else if (event.type === "customer.subscription.updated") {
+      result = await handleSubscriptionUpdated(event.id, event.data && event.data.object ? event.data.object : null);
+    } else if (event.type === "customer.subscription.deleted") {
+      result = await handleSubscriptionDeleted(event.id, event.data && event.data.object ? event.data.object : null);
+    } else if (event.type === "invoice.payment_failed") {
+      result = await handleInvoicePaymentFailed(event.id, event.data && event.data.object ? event.data.object : null);
+    } else if (event.type === "charge.refunded") {
+      result = await handleChargeRefunded(event.id, event.data && event.data.object ? event.data.object : null);
     }
 
     await kvSetJson(keyWebhookEvent(event.id), {
       processed: true,
-      ignored: true,
       eventId: event.id,
       type: event.type,
+      result,
       processedAt: nowSec(),
       build: BUILD
     });
@@ -505,9 +823,9 @@ module.exports = async function handler(req, res) {
     return sendJson(req, res, 200, {
       ok: true,
       received: true,
-      ignored: true,
       type: event.type,
       eventId: event.id,
+      result,
       build: BUILD
     });
   } catch (err) {
