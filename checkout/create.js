@@ -10,14 +10,14 @@ const BUILD = "sn-stripe-checkout-2026-03-19b";
 const STRIPE_SECRET_KEY = "REPLACE_WITH_YOUR_STRIPE_SECRET_KEY";
 
 const PRICE_IDS = {
-  basic_monthly: "REPLACE_WITH_STRIPE_PRICE_BASIC_MONTHLY",
-  basic_yearly: "REPLACE_WITH_STRIPE_PRICE_BASIC_YEARLY",
-  pro_monthly: "REPLACE_WITH_STRIPE_PRICE_PRO_MONTHLY",
-  pro_yearly: "REPLACE_WITH_STRIPE_PRICE_PRO_YEARLY",
-  elite_monthly: "REPLACE_WITH_STRIPE_PRICE_ELITE_MONTHLY",
-  elite_yearly: "REPLACE_WITH_STRIPE_PRICE_ELITE_YEARLY",
-  express_one_time: "REPLACE_WITH_STRIPE_PRICE_EXPRESS_ONE_TIME",
-  black_express_one_time: "REPLACE_WITH_STRIPE_PRICE_BLACK_EXPRESS_ONE_TIME"
+  basic_monthly: "price_1TCsni9sB3aXUCNwFEbPx7xq",
+  basic_yearly: "price_1TCsoR9sB3aXUCNwJxuvYVkc",
+  pro_monthly: "price_1TCspL9sB3aXUCNwvQz851Bo",
+  pro_yearly: "price_1TCsqZ9sB3aXUCNwmbWjGdaM",
+  elite_monthly: "price_1TCsrJ9sB3aXUCNwrKLkzWAt",
+  elite_yearly: "price_1TCss39sB3aXUCNwhXpf1vdL",
+  express_one_time: "price_1TCsuK9sB3aXUCNwhbgKorRG",
+  black_express_one_time: "price_1TCsvP9sB3aXUCNwrcbQWTc4"
 };
 
 const stripe = new Stripe(STRIPE_SECRET_KEY);
