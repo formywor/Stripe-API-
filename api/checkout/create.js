@@ -1,20 +1,20 @@
 const crypto = require("crypto");
 const Stripe = require("stripe");
 
-const BUILD = "sn-stripe-checkout-2026-03-20d";
+const BUILD = "sn-stripe-checkout-2026-03-24-envfix";
 
 const ALLOWED_ORIGIN = "https://scriptnovaa.com";
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 
 const PRICE_IDS = {
-  basic_monthly: "price_1TCsni9sB3aXUCNwFEbPx7xq",
-  basic_yearly: "price_1TCsoR9sB3aXUCNwJxuvYVkc",
-  pro_monthly: "price_1TCspL9sB3aXUCNwvQz851Bo",
-  pro_yearly: "price_1TCsqZ9sB3aXUCNwmbWjGdaM",
-  elite_monthly: "price_1TCsrJ9sB3aXUCNwrKLkzWAt",
-  elite_yearly: "price_1TCss39sB3aXUCNwhXpf1vdL",
-  express_one_time: "price_1TCsuK9sB3aXUCNwhbgKorRG",
-  black_express_one_time: "price_1TCsvP9sB3aXUCNwrcbQWTc4"
+  basic_monthly: String(process.env.basic_monthly || "").trim(),
+  basic_yearly: String(process.env.basic_yearly || "").trim(),
+  pro_monthly: String(process.env.pro_monthly || "").trim(),
+  pro_yearly: String(process.env.pro_yearly || "").trim(),
+  elite_monthly: String(process.env.elite_monthly || "").trim(),
+  elite_yearly: String(process.env.elite_yearly || "").trim(),
+  express_one_time: String(process.env.express_one_time || "").trim(),
+  black_express_one_time: String(process.env.black_express_one_time || "").trim()
 };
 
 const stripe = new Stripe(STRIPE_SECRET_KEY || "sk_test_missing");
@@ -215,11 +215,12 @@ module.exports = async function handler(req, res) {
     }
 
     const priceId = getPriceIdForPlan(plan.planKey);
-    if (!priceId || priceId.indexOf("REPLACE_WITH_") === 0) {
+    if (!priceId || priceId.indexOf("price_") !== 0) {
       return sendJson(req, res, 500, {
         ok: false,
         error: "missing_price_id",
         planId: plan.planKey,
+        envName: plan.planKey,
         build: BUILD
       });
     }
@@ -285,6 +286,8 @@ module.exports = async function handler(req, res) {
       ok: false,
       error: "stripe_checkout_create_failed",
       message: err && err.message ? String(err.message) : "unknown_stripe_error",
+      type: err && err.type ? String(err.type) : "",
+      code: err && err.code ? String(err.code) : "",
       build: BUILD
     });
   }
